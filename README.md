@@ -8,13 +8,14 @@ It is built for prototyping and development, not enterprise use: single control 
 
 | Step | Component | Notes |
 |------|-----------|-------|
-| 1 | [k3s](https://k3s.io) (Kubernetes v1.34 line) | Traefik disabled; the bundled `local-path` storage class is the default |
+| 1 | [k3s](https://k3s.io) (Kubernetes v1.34 line) | Traefik disabled; the bundled `local-path` storage class is the default; `nvidia` is the default container runtime so GPU pods (including Run:ai's own) get the GPU libraries |
 | 2 | NVIDIA GPU Operator | Driver install disabled (DGX OS ships the driver); container toolkit installed only if not already on the host |
 | 3 | HAProxy Kubernetes Ingress | Exposes ports 80/443 on the node via k3s servicelb |
 | 4 | kube-prometheus-stack | Prometheus operator only (Grafana and Alertmanager off); required by the Run:ai cluster |
-| 5 | TLS certificates | A private CA plus a certificate for the Run:ai host names (self-signed) |
-| 6 | Run:ai control plane | Helm chart `runai/control-plane` from NGC, namespace `runai-backend` |
-| 7 | Run:ai cluster | Registered automatically through the control plane API, namespace `runai` |
+| 5 | Knative Serving | Required for Run:ai inference workloads; Kourier ingress stays ClusterIP |
+| 6 | TLS certificates | A private CA plus a certificate for the Run:ai host names (self-signed) |
+| 7 | Run:ai control plane | Helm chart `runai/control-plane` from NGC, namespace `runai-backend`; CPU requests are lowered afterwards so the cluster components fit on one node |
+| 8 | Run:ai cluster | Registered automatically through the control plane API, namespace `runai` |
 
 Helm is installed too if it is missing.
 
@@ -93,6 +94,73 @@ Run:ai requires the admin user to be an email address and the password to have a
 3. The API is at the printed API URL. Authenticate against `/api/v1/token`.
 4. Install the Run:ai CLI from the UI to submit jobs from your own machine.
 
+## Running workloads
+
+Create a project in the UI first (for example `inferencetest`). Run:ai puts each project in a namespace named `runai-<project>`, so the examples below use `runai-inferencetest`.
+
+```bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export NS=runai-inferencetest
+```
+
+### Request a whole GPU
+
+On the Spark, request **1 whole GPU** (GPU devices = 1, no fraction and no GPU memory setting). Fractional requests make Run:ai start a `gpu-reservation` pod, and that pod crash-looped on the Spark in testing (see Limitations).
+
+The Run:ai CLI syntax varies by version, so check your flags first:
+
+```bash
+runai inference submit --help
+runai workspace submit --help
+```
+
+The UI (Workloads > New workload > Inference) is the most reliable way to submit. A NIM from NGC needs an image, the port the server listens on (8000 for NIM), your NGC key as an environment variable, and 1 GPU device.
+
+### Check status
+
+```bash
+kubectl -n $NS get pods
+kubectl -n $NS get inferenceworkload
+POD=$(kubectl -n $NS get pod -l serving.knative.dev/service=<workload-name> -o name | head -1)
+kubectl -n $NS logs $POD --all-containers --tail=40
+```
+
+A pod showing `2/2 Running` is not necessarily ready to serve. The first start of a large model can spend several minutes loading weights and compiling GPU kernels, and requests return `502 Bad Gateway` until that finishes. Poll the readiness endpoint:
+
+```bash
+curl -s localhost:8000/v1/health/ready
+```
+
+### Call a model from the Spark
+
+Inference workloads default to a private, in-cluster URL. Forward a local port to the pod:
+
+```bash
+kubectl -n $NS port-forward $POD 8000:8000 &
+curl -s localhost:8000/v1/models
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"Say hello"}],"max_tokens":500}'
+```
+
+Use the model ID returned by `/v1/models`. Some reasoning models print their thinking before the answer, so a small `max_tokens` can cut the reply off mid-thought.
+
+### Call a model from another machine on the LAN
+
+Bind the forward to all interfaces:
+
+```bash
+pkill -f 'port-forward.*8000:8000'   # free the port if an earlier forward is running
+kubectl -n $NS port-forward --address 0.0.0.0 $POD 8000:8000
+```
+
+Then from the other machine:
+
+```bash
+curl http://<spark-hostname>:8000/v1/models
+```
+
+This endpoint has no authentication and ends when the command stops, so use it for testing only. If the connection is refused or times out, check the Spark's firewall (`sudo ufw status`). For a lasting endpoint, make the workload's service URL external in Run:ai (untested here; the URL, certificate and any auth requirements depend on your Run:ai version).
+
 ## Removing everything
 
 ```bash
@@ -160,4 +228,7 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 - The Run:ai container toolkit is disabled. On the Spark's GB10 GPU (unified memory) its NVML memory query returns "Not Supported" and the daemon crash-loops, which keeps the cluster from becoming healthy. As a result, features that depend on it (fractional GPUs and GPU-memory limits/accounting) are unavailable; whole-GPU workloads are unaffected.
 - Run:ai is third-party licensed software; this repository only automates its documented installation.
 - The control plane API calls used for automatic cluster registration come from observed behavior, so a future Run:ai version may need the script updated.
-- Optional Run:ai features that need extra operators (for example Knative-based inference and distributed training operators) are not installed.
+- Fractional GPU requests did not work in testing: the `gpu-reservation` pod failed with `exec /workspace/resource-reservation: no such file or directory`. That usually means a binary built for another CPU architecture, and the Spark is ARM64, but the image architecture was not confirmed. Use whole-GPU requests, or try a newer `RUNAI_VERSION`.
+- Unified memory is shared between the GPU, the OS and every cluster service. A model server that reserves most GPU memory (vLLM defaults to 75-90%) leaves little for everything else.
+- Distributed training operators and other optional Run:ai integrations are not installed.
+- The control plane CPU-request reduction and the `nvidia` default runtime were applied by hand on the tested machine and have not been verified from a clean run of the script.

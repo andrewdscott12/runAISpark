@@ -46,7 +46,7 @@ install_k3s() {
   if ! command -v k3s >/dev/null; then
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_CHANNEL="$K3S_CHANNEL" \
-      INSTALL_K3S_EXEC="server --disable traefik --write-kubeconfig-mode 644 --tls-san ${NODE_IP}" sh -
+      INSTALL_K3S_EXEC="server --disable traefik --write-kubeconfig-mode 644 --default-runtime nvidia --tls-san ${NODE_IP}" sh -
   fi
   until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 3; done
   mkdir -p "$STATE_DIR"
@@ -264,6 +264,11 @@ install_control_plane() {
     --set tenantsManager.config.adminUsername="$ADMIN_USER" \
     --set-string tenantsManager.config.adminPassword="$ADMIN_PASSWORD" \
     --timeout 30m
+
+  # Chart requests (3x NATS, postgres, keycloak at 1 CPU each) fill the node's CPU requests and starve the cluster chart.
+  log "Lowering control plane CPU requests"
+  kubectl -n runai-backend set resources statefulset --all --requests=cpu=200m >/dev/null 2>&1 || true
+  kubectl -n runai-backend set resources deployment --all --requests=cpu=100m >/dev/null 2>&1 || true
 
   log "Waiting for control plane pods to become ready"
   local obj
