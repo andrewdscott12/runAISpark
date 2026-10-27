@@ -109,7 +109,8 @@ install_prereqs() {
   kubectl wait --for=condition=Established crd/knativeservings.operator.knative.dev --timeout=5m
   kubectl create namespace knative-serving --dry-run=client -o yaml | kubectl apply -f -
   # Kourier stays ClusterIP so it does not fight HAProxy for ports 80/443 on k3s servicelb.
-  kubectl apply -f - <<'EOF'
+  # Without a Knative domain, Run:ai greys out the public inference endpoint option.
+  kubectl apply -f - <<EOF
 apiVersion: operator.knative.dev/v1beta1
 kind: KnativeServing
 metadata:
@@ -121,8 +122,11 @@ spec:
       enabled: true
       service-type: ClusterIP
   config:
+    domain:
+      ${CLUSTER_DOMAIN}: ""
     network:
       ingress-class: kourier.ingress.networking.knative.dev
+      domain-template: "{{.Name}}-{{.Namespace}}.{{.Domain}}"
     autoscaler:
       enable-scale-to-zero: "true"
     defaults:

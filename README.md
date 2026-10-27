@@ -159,7 +159,7 @@ Then from the other machine:
 curl http://<spark-hostname>:8000/v1/models
 ```
 
-This endpoint has no authentication and ends when the command stops, so use it for testing only. If the connection is refused or times out, check the Spark's firewall (`sudo ufw status`). For a lasting endpoint, make the workload's service URL external in Run:ai (untested here; the URL, certificate and any auth requirements depend on your Run:ai version).
+This endpoint has no authentication and ends when the command stops, so use it for testing only. If the connection is refused or times out, check the Spark's firewall (`sudo ufw status`). For a lasting endpoint, enable the public/external access option when you create the inference workload. That option is only available once Knative has a domain configured; the script sets it to the cluster domain (`cluster.<ip>.sslip.io`), and on a machine installed before that change you can add it with `kubectl -n knative-serving patch knativeserving knative-serving --type merge -p '{"spec":{"config":{"domain":{"cluster.<ip-with-dashes>.sslip.io":""},"network":{"domain-template":"{{.Name}}-{{.Namespace}}.{{.Domain}}"}}}}'`. It is not yet verified that traffic then reaches the workload from other machines: Kourier is ClusterIP-only, so the URL may still need an ingress route.
 
 ## Removing everything
 
